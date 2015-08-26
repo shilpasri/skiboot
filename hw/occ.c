@@ -27,16 +27,34 @@
 #include <opal-api.h>
 #include <opal-msg.h>
 #include <timer.h>
+#include <ast.h>
+#include <sensor.h>
 
 /* OCC Communication Area for PStates */
 
 #define P8_HOMER_SAPPHIRE_DATA_OFFSET	0x1F8000
+#define P8_HOMER_SENSOR_DATA_OFFSET	(P8_HOMER_SAPPHIRE_DATA_OFFSET + \
+					sizeof(struct occ_pstate_table))
 
 #define MAX_PSTATES 256
+#define MAX_CORES   12
 
 #define chip_occ_data(chip) \
 		((struct occ_pstate_table *)(chip->homer_base + \
 				P8_HOMER_SAPPHIRE_DATA_OFFSET))
+
+#define occ_sensor_data(chip) \
+		((struct occ_sensor_table *) (chip->homer_base + \
+		  P8_HOMER_SENSOR_DATA_OFFSET))
+
+#define OFFSET(x)	offsetof(struct occ_sensor_table, x)
+
+#define OCC_SENSOR_NODE(parent, child, name, unit, addr, size)	\
+do { \
+	child = dt_new_addr(parent, name, addr); \
+	dt_add_property_string(child, "unit", unit); \
+	dt_add_property_cells(child, "reg", hi32(addr), lo32(addr), size); \
+} while (0)
 
 static bool occ_reset;
 static struct lock occ_lock = LOCK_UNLOCKED;
@@ -60,6 +78,34 @@ struct occ_pstate_table {
 	u8 spare2;
 	u64 reserved;
 	struct occ_pstate_entry pstates[MAX_PSTATES];
+	u8 pad[112];
+};
+
+struct __attribute__ ((packed)) occ_sensor_table {
+	/* Config */
+	u8 valid;
+	u8 version;
+	u16 core_mask;
+	/* System sensors */
+	u16 ambient_temperature;
+	u16 power;
+	u16 fan_power;
+	u16 io_power;
+	u16 storage_power;
+	u16 gpu_power;
+	u16 fan_speed;
+	/* Processor Sensors */
+	u16 pwr250us;
+	u16 pwr250usvdd;
+	u16 pwr250usvcs;
+	u16 pwr250usmem;
+	u64 chip_bw;
+	/* Core sensors*/
+	u16 core_temp[12];
+	u64 count;
+	u32 chip_energy;
+	u32 system_energy;
+	u8  pad[54];
 };
 
 DEFINE_LOG_ENTRY(OPAL_RC_OCC_LOAD, OPAL_PLATFORM_ERR_EVT, OPAL_OCC,
@@ -239,6 +285,34 @@ out:
 	return rc;
 }
 
+int occ_read_sensor(unsigned int chip_id, uint32_t sensor_hndl, uint64_t *val)
+{
+	struct proc_chip *chip;
+	struct occ_sensor_table *sensor;
+
+	chip = get_chip(chip_id);
+	sensor = occ_sensor_data(chip);
+
+	if (!sensor->valid)
+		return -EINVAL;
+
+	switch (sensor_hndl) {
+	case 0x14:
+		*val = sensor->ambient_temperature;
+		break;
+	case 0x16:
+		*val = sensor->power;
+		break;
+	case 0x1B:
+		*val = sensor->fan_speed;
+		break;
+	default:
+		return -EINVAL;
+	};
+
+	return 0;
+}
+
 /*
  * Prepare chip for pstate transitions
  */
@@ -378,6 +452,112 @@ done:
 	unlock(&occ_lock);
 }
 
+struct sensor_strings {
+	const char *name;
+	const char *unit;
+	const unsigned int size;
+	const unsigned int offset;
+};
+
+static struct sensor_strings system_sensors[] = {
+	{"ambient-temperature", " C\0", 2, OFFSET(ambient_temperature)},
+	{"power", "Watts", 2, OFFSET(power)},
+	{"fan-power", "Watts", 2, OFFSET(fan_power)},
+	{"io-power", "Watts", 2, OFFSET(io_power)},
+	{"storage-power", "Watts", 2, OFFSET(storage_power)},
+	{"gpu-power", "Watts", 2, OFFSET(gpu_power)},
+	{"fan-speed", "RPM", 2, OFFSET(fan_speed)},
+	{"count", "\0", 8, OFFSET(count)},
+	{"system-energy", "Joules", 4, OFFSET(system_energy)},
+};
+
+static struct sensor_strings chip_sensors[] = {
+	{"power", "Watts", 2, OFFSET(pwr250us)},
+	{"power-vdd", "Watts", 2, OFFSET(pwr250usvdd)},
+	{"power-vcs", "Watts", 2, OFFSET(pwr250usvcs)},
+	{"power-memory", "Watts", 2, OFFSET(pwr250usmem)},
+	{"chip-mbw", "GB/s", 8, OFFSET(chip_bw)},
+	{"chip-energy", "Joules", 4, OFFSET(chip_energy)},
+};
+
+static struct sensor_strings core_sensors[] = {
+	{"temp", " C\0", 2, OFFSET(core_temp)},
+};
+
+static void populate_occ_sensors(void)
+{
+	struct dt_node *occ_sensor_node, *node, *chip_node, *core_node[MAX_CORES];
+	struct dt_node *system_sensor_node;
+	struct cpu_thread *core;
+	struct proc_chip *chip;
+	uint64_t addr;
+	int i, j, k, nr_cores;
+
+	occ_sensor_node = dt_new(dt_root, "occ_sensors");
+	if (!occ_sensor_node) {
+		prerror("OCC: Failed to create occ_sensor node\n");
+		return;
+	}
+	dt_add_property_cells(occ_sensor_node, "#address-cells", 2);
+	dt_add_property_cells(occ_sensor_node, "#size-cells", 1);
+	dt_add_property_cells(occ_sensor_node, "nr_system_sensors", ARRAY_SIZE(system_sensors));
+	dt_add_property_cells(occ_sensor_node, "nr_chip_sensors", ARRAY_SIZE(chip_sensors));
+	dt_add_property_cells(occ_sensor_node, "nr_core_sensors", ARRAY_SIZE(core_sensors));
+
+	chip = next_chip(NULL);
+	addr = (uint64_t)occ_sensor_data(chip);
+
+	if (*(u8 *)addr) {       /* sensor table valid byte */
+		printf("OCC: Populating OCC sensorss\n");
+	} else {
+		printf("OCC: Sensor data invalid\n");
+		return;
+	}
+
+	system_sensor_node = dt_new(occ_sensor_node, "system_sensor");
+	dt_add_property_cells(system_sensor_node, "#address-cells", 2);
+	dt_add_property_cells(system_sensor_node, "#size-cells", 1);
+
+	for (i = 0; i < ARRAY_SIZE(system_sensors); i++) {
+		OCC_SENSOR_NODE(system_sensor_node, node, system_sensors[i].name,
+				system_sensors[i].unit, addr + system_sensors[i].offset,
+				system_sensors[i].size);
+	}
+	for_each_chip(chip) {
+		addr = (uint64_t)occ_sensor_data(chip);
+		OCC_SENSOR_NODE(occ_sensor_node, chip_node, "chip", NULL, addr, 0);
+		dt_add_property_cells(chip_node, "ibm,chip-id", chip->id);
+		dt_add_property_cells(chip_node, "#address-cells", 2);
+		dt_add_property_cells(chip_node, "#size-cells", 1);
+
+		for (i = 0; i < ARRAY_SIZE(chip_sensors); i++) {
+			OCC_SENSOR_NODE(chip_node, node, chip_sensors[i].name,
+					chip_sensors[i].unit, addr + chip_sensors[i].offset,
+					chip_sensors[i].size);
+		}
+		i = k = 0;
+		for_each_available_core_in_chip(core, chip->id) {
+			core_node[i] = dt_new_addr(chip_node, "core", core->pir);
+			dt_add_property_cells(core_node[i], "ibm,core-id", core->pir);
+			dt_add_property_cells(core_node[i], "#address-cells", 2);
+			dt_add_property_cells(core_node[i], "#size-cells", 1);
+			i++;
+		}
+		nr_cores = i;
+		for (i = 0; i < ARRAY_SIZE(core_sensors); i++) {
+			for (j = 0; j < nr_cores; j++) {
+				while (!((*(u16 *)(addr + 2) >> k ) & 1))
+					k++;
+				OCC_SENSOR_NODE(core_node[j], node, core_sensors[i].name,
+                                                core_sensors[i].unit, addr + core_sensors[i].offset + k * 2,
+						core_sensors[i].size);
+				k++;
+			}
+		}
+	}
+	printf("OCC: DT added %d occ sensors\n", i);
+}
+
 /* CPU-OCC PState init */
 /* Called after OCC init on P8 */
 void occ_pstates_init(void)
@@ -422,6 +602,8 @@ void occ_pstates_init(void)
 		}
 	}
 
+	op_init_sensor();
+	populate_occ_sensors();
 	/* Add opal_poller to poll OCC throttle status of each chip */
 	for_each_chip(chip)
 		chip->throttle = 0;

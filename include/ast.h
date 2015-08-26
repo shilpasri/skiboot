@@ -96,6 +96,10 @@ void ast_setup_ibt(uint16_t io_base, uint8_t irq);
 struct spi_flash_ctrl;
 int ast_sf_open(uint8_t type, struct spi_flash_ctrl **ctrl);
 void ast_sf_close(struct spi_flash_ctrl *ctrl);
-
+int64_t op_opal_read_sensor(uint32_t sensor_hndl, int token,
+				uint32_t *sensor_data);
+void op_init_sensor(void);
+int occ_read_sensor(unsigned int chip_id, uint32_t sensor_hndl,
+			uint64_t *val);
 
 #endif /* __AST_H */
