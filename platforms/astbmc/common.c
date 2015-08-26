@@ -26,6 +26,7 @@
 #include <bt.h>
 #include <errorlog.h>
 #include <lpc.h>
+#include <ast.h>
 
 #include "astbmc.h"
 
@@ -43,6 +44,12 @@
 #define MBOX_IO_BASE 0x1000
 #define MBOX_IO_COUNT 6
 #define MBOX_LPC_IRQ 9
+
+int64_t astbmc_sensor_read(uint32_t sensor_hndl, int token,
+				uint32_t *sensor_data)
+{
+	return op_opal_read_sensor(sensor_hndl, token, sensor_data);
+}
 
 void astbmc_ext_irq_serirq_cpld(unsigned int chip_id)
 {

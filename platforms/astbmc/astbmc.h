@@ -54,4 +54,6 @@ extern void check_all_slot_table(void);
 extern void slot_table_init(const struct slot_table_entry *top_table);
 extern void slot_table_get_slot_info(struct phb *phb, struct pci_device * pd);
 
+extern int64_t astbmc_sensor_read(uint32_t sensor_hndl, int token,
+					uint32_t *sensor_data);
 #endif /* __ASTBMC_H */
