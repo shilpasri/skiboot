@@ -55,11 +55,12 @@ struct occ_pstate_table {
 	u8 throttle;
 	s8 pstate_min;
 	s8 pstate_nom;
-	s8 pstate_max;
-	u8 spare1;
-	u8 spare2;
+	s8 pstate_turbo;
+	s8 pstate_ultra_turbo;
+	u8 spare;
 	u64 reserved;
 	struct occ_pstate_entry pstates[MAX_PSTATES];
+	s8 core_max[16];
 };
 
 DEFINE_LOG_ENTRY(OPAL_RC_OCC_LOAD, OPAL_PLATFORM_ERR_EVT, OPAL_OCC,
@@ -142,10 +143,11 @@ static bool add_cpu_pstate_properties(s8 *pstate_nom)
 	uint64_t occ_data_area;
 	struct occ_pstate_table *occ_data;
 	struct dt_node *power_mgt;
-	u8 nr_pstates;
+	u8 nr_pstates, ultra_turbo_en, nr_cores;
+	s8 pmax;
 	/* Arrays for device tree */
 	u32 *dt_id, *dt_freq;
-	u8 *dt_vdd, *dt_vcs;
+	u8 *dt_vdd, *dt_vcs, *dt_core_max = NULL;
 	bool rc;
 	int i;
 
@@ -171,10 +173,25 @@ static bool add_cpu_pstate_properties(s8 *pstate_nom)
 		return false;
 	}
 
-	nr_pstates = occ_data->pstate_max - occ_data->pstate_min + 1;
+	if (occ_data->version == 1) {
+		ultra_turbo_en = 0;
+		pmax = occ_data->pstate_turbo;
+		goto next;
+	}
+
+	if (occ_data->pstate_ultra_turbo > occ_data->pstate_turbo) {
+		ultra_turbo_en = 1;
+		pmax = occ_data->pstate_ultra_turbo;
+	} else {
+		ultra_turbo_en = 0;
+		pmax = occ_data->pstate_turbo;
+	}
+
+next:
+	nr_pstates = pmax - occ_data->pstate_min + 1;
 	prlog(PR_DEBUG, "OCC: Min %d Nom %d Max %d Nr States %d\n", 
 	      occ_data->pstate_min, occ_data->pstate_nom,
-	      occ_data->pstate_max, nr_pstates);
+	      pmax, nr_pstates);
 
 	if (nr_pstates <= 1 || nr_pstates > 128) {
 		prerror("OCC: OCC range is not valid\n");
@@ -215,6 +232,18 @@ static bool add_cpu_pstate_properties(s8 *pstate_nom)
 		goto out_free_vdd;
 	}
 
+	nr_cores = get_available_nr_cores_in_chip(chip->id);
+	if (ultra_turbo_en) {
+		dt_core_max = (u8 *)malloc(nr_cores * sizeof(u8));
+		if (!dt_core_max) {
+			printf("OCC: dt_core_max alloc failure\n");
+			goto out_free_vcs;
+		}
+
+		for (i = 0; i < nr_cores; i++)
+			dt_core_max[i] = occ_data->core_max[i];
+	}
+
 	for( i=0; i < nr_pstates; i++) {
 		dt_id[i] = occ_data->pstates[i].id;
 		dt_freq[i] = occ_data->pstates[i].freq_khz/1000;
@@ -223,18 +252,31 @@ static bool add_cpu_pstate_properties(s8 *pstate_nom)
 	}
 
 	/* Add the device-tree entries */
-	dt_add_property(power_mgt, "ibm,pstate-ids", dt_id, nr_pstates * 4);
-	dt_add_property(power_mgt, "ibm,pstate-frequencies-mhz", dt_freq, nr_pstates * 4);
+	dt_add_property(power_mgt, "ibm,pstate-ids", dt_id,
+			nr_pstates * sizeof(u32));
+	dt_add_property(power_mgt, "ibm,pstate-frequencies-mhz", dt_freq,
+			nr_pstates * sizeof(u32));
 	dt_add_property(power_mgt, "ibm,pstate-vdds", dt_vdd, nr_pstates);
 	dt_add_property(power_mgt, "ibm,pstate-vcss", dt_vcs, nr_pstates);
 	dt_add_property_cells(power_mgt, "ibm,pstate-min", occ_data->pstate_min);
 	dt_add_property_cells(power_mgt, "ibm,pstate-nominal", occ_data->pstate_nom);
-	dt_add_property_cells(power_mgt, "ibm,pstate-max", occ_data->pstate_max);
+	dt_add_property_cells(power_mgt, "ibm,pstate-max", pmax);
+	dt_add_property_cells(power_mgt, "ibm,ultra-turbo-en", ultra_turbo_en);
 
+	if (ultra_turbo_en) {
+		dt_add_property_cells(power_mgt, "ibm,pstate-turbo",
+				      occ_data->pstate_turbo);
+		dt_add_property_cells(power_mgt, "ibm,pstate-ultra-turbo",
+				      occ_data->pstate_ultra_turbo);
+		dt_add_property(power_mgt, "ibm,pstate-core-max", dt_core_max,
+				nr_cores);
+		free(dt_core_max);
+	}
 	/* Return pstate to set for each core */
 	*pstate_nom = occ_data->pstate_nom;
 	rc = true;
 
+out_free_vcs:
 	free(dt_vcs);
 out_free_vdd:
 	free(dt_vdd);
