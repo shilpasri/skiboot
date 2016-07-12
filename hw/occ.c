@@ -105,7 +105,12 @@ struct __attribute__ ((packed)) occ_sensor_table {
 	u64 count;
 	u32 chip_energy;
 	u32 system_energy;
-	u8  pad[54];
+	// Power_Cap sensors 
+	u16 current_pcap;
+	u16 soft_min_pcap;
+	u16 hard_min_pcap;
+	u16 max_pcap;
+	u8  pad[46];
 };
 
 DEFINE_LOG_ENTRY(OPAL_RC_OCC_LOAD, OPAL_PLATFORM_ERR_EVT, OPAL_OCC,
@@ -480,6 +485,15 @@ static struct sensor_strings chip_sensors[] = {
 	{"chip-energy", "Joules", 4, OFFSET(chip_energy)},
 };
 
+static struct sensor_strings power_cap_sensors[] = {
+	{"current-pcap", "Watts", 2, OFFSET(current_pcap)},
+	{"soft-min-pcap", "Watts", 2, OFFSET(soft_min_pcap)},
+	{"hard-min-pcap", "Watts", 2, OFFSET(hard_min_pcap)},
+	{"max-pcap", "Watts", 2, OFFSET(max_pcap)},
+};
+
+
+
 static struct sensor_strings core_sensors[] = {
 	{"temp", " C\0", 2, OFFSET(core_temp)},
 };
@@ -487,7 +501,7 @@ static struct sensor_strings core_sensors[] = {
 static void populate_occ_sensors(void)
 {
 	struct dt_node *occ_sensor_node, *node, *chip_node, *core_node[MAX_CORES];
-	struct dt_node *system_sensor_node;
+	struct dt_node *system_sensor_node, *power_cap_sensor_node;
 	struct cpu_thread *core;
 	struct proc_chip *chip;
 	uint64_t addr;
@@ -503,6 +517,7 @@ static void populate_occ_sensors(void)
 	dt_add_property_cells(occ_sensor_node, "nr_system_sensors", ARRAY_SIZE(system_sensors));
 	dt_add_property_cells(occ_sensor_node, "nr_chip_sensors", ARRAY_SIZE(chip_sensors));
 	dt_add_property_cells(occ_sensor_node, "nr_core_sensors", ARRAY_SIZE(core_sensors));
+	dt_add_property_cells(occ_sensor_node, "nr_power_cap_sensors", ARRAY_SIZE(power_cap_sensors));
 
 	chip = next_chip(NULL);
 	addr = (uint64_t)occ_sensor_data(chip);
@@ -521,8 +536,19 @@ static void populate_occ_sensors(void)
 	for (i = 0; i < ARRAY_SIZE(system_sensors); i++) {
 		OCC_SENSOR_NODE(system_sensor_node, node, system_sensors[i].name,
 				system_sensors[i].unit, addr + system_sensors[i].offset,
-				system_sensors[i].size);
+				system_sensors[i].size);	
 	}
+
+	power_cap_sensor_node = dt_new(occ_sensor_node, "power_cap_sensor");
+        dt_add_property_cells(power_cap_sensor_node, "#address-cells", 2);
+        dt_add_property_cells(power_cap_sensor_node, "#size-cells", 1);
+
+	for (i = 0; i < ARRAY_SIZE(power_cap_sensors); i++) {
+		OCC_SENSOR_NODE(power_cap_sensor_node, node, power_cap_sensors[i].name,
+				power_cap_sensors[i].unit, addr + power_cap_sensors[i].offset,
+				power_cap_sensors[i].size);
+	}
+
 	for_each_chip(chip) {
 		addr = (uint64_t)occ_sensor_data(chip);
 		OCC_SENSOR_NODE(occ_sensor_node, chip_node, "chip", NULL, addr, 0);
