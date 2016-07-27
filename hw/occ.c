@@ -49,11 +49,12 @@
 
 #define OFFSET(x)	offsetof(struct occ_sensor_table, x)
 
-#define OCC_SENSOR_NODE(parent, child, name, unit, addr, size)	\
-do { \
-	child = dt_new_addr(parent, name, addr); \
-	dt_add_property_string(child, "unit", unit); \
-	dt_add_property_cells(child, "reg", hi32(addr), lo32(addr), size); \
+#define OCC_SENSOR_NODE(parent, child, name, unit, scale, addr, size)	\
+do {									\
+	child = dt_new_addr(parent, name, addr);			\
+	dt_add_property_string(child, "unit", unit);			\
+	dt_add_property_string(child, "scale", scale);			\
+	dt_add_property_cells(child, "reg", hi32(addr), lo32(addr), size);\
 } while (0)
 
 static bool occ_reset;
@@ -460,42 +461,43 @@ done:
 struct sensor_strings {
 	const char *name;
 	const char *unit;
+	const char *scale;
 	const unsigned int size;
 	const unsigned int offset;
 };
 
 static struct sensor_strings system_sensors[] = {
-	{"ambient-temperature", " C\0", 2, OFFSET(ambient_temperature)},
-	{"power", "Watts", 2, OFFSET(power)},
-	{"fan-power", "Watts", 2, OFFSET(fan_power)},
-	{"io-power", "Watts", 2, OFFSET(io_power)},
-	{"storage-power", "Watts", 2, OFFSET(storage_power)},
-	{"gpu-power", "Watts", 2, OFFSET(gpu_power)},
-	{"fan-speed", "RPM", 2, OFFSET(fan_speed)},
-	{"count", "\0", 8, OFFSET(count)},
-	{"system-energy", "Joules", 4, OFFSET(system_energy)},
+	{"ambient-temperature", " C\0", "1", 2, OFFSET(ambient_temperature)},
+	{"power", "Watts", "1", 2, OFFSET(power)},
+	{"fan-power", "Watts", "1", 2, OFFSET(fan_power)},
+	{"io-power", "Watts", "1", 2, OFFSET(io_power)},
+	{"storage-power", "Watts", "1", 2, OFFSET(storage_power)},
+	{"gpu-power", "Watts", "1", 2, OFFSET(gpu_power)},
+	{"fan-speed", "RPM", "1", 2, OFFSET(fan_speed)},
+	{"count", "\0", "1", 8, OFFSET(count)},
+	{"system-energy", "Joules", "1", 4, OFFSET(system_energy)},
 };
 
 static struct sensor_strings chip_sensors[] = {
-	{"power", "Watts", 2, OFFSET(pwr250us)},
-	{"power-vdd", "Watts", 2, OFFSET(pwr250usvdd)},
-	{"power-vcs", "Watts", 2, OFFSET(pwr250usvcs)},
-	{"power-memory", "Watts", 2, OFFSET(pwr250usmem)},
-	{"chip-mbw", "GB/s", 8, OFFSET(chip_bw)},
-	{"chip-energy", "Joules", 4, OFFSET(chip_energy)},
+	{"power", "Watts", "1", 2, OFFSET(pwr250us)},
+	{"power-vdd", "Watts", "1", 2, OFFSET(pwr250usvdd)},
+	{"power-vcs", "Watts", "1", 2, OFFSET(pwr250usvcs)},
+	{"power-memory", "Watts", "1", 2, OFFSET(pwr250usmem)},
+	{"chip-mbw", "GB/s", "1", 8, OFFSET(chip_bw)},
+	{"chip-energy", "Joules", "1", 4, OFFSET(chip_energy)},
 };
 
 static struct sensor_strings power_cap_sensors[] = {
-	{"current-pcap", "Watts", 2, OFFSET(current_pcap)},
-	{"soft-min-pcap", "Watts", 2, OFFSET(soft_min_pcap)},
-	{"hard-min-pcap", "Watts", 2, OFFSET(hard_min_pcap)},
-	{"max-pcap", "Watts", 2, OFFSET(max_pcap)},
+	{"current-pcap", "Watts", "1", 2, OFFSET(current_pcap)},
+	{"soft-min-pcap", "Watts", "1", 2, OFFSET(soft_min_pcap)},
+	{"hard-min-pcap", "Watts", "1", 2, OFFSET(hard_min_pcap)},
+	{"max-pcap", "Watts", "1", 2, OFFSET(max_pcap)},
 };
 
 
 
 static struct sensor_strings core_sensors[] = {
-	{"temp", " C\0", 2, OFFSET(core_temp)},
+	{"temp", " C\0", "1", 2, OFFSET(core_temp)},
 };
 
 static void populate_occ_sensors(void)
@@ -535,7 +537,8 @@ static void populate_occ_sensors(void)
 
 	for (i = 0; i < ARRAY_SIZE(system_sensors); i++) {
 		OCC_SENSOR_NODE(system_sensor_node, node, system_sensors[i].name,
-				system_sensors[i].unit, addr + system_sensors[i].offset,
+				system_sensors[i].unit, system_sensors[i].scale,
+				addr + system_sensors[i].offset,
 				system_sensors[i].size);	
 	}
 
@@ -545,20 +548,20 @@ static void populate_occ_sensors(void)
 
 	for (i = 0; i < ARRAY_SIZE(power_cap_sensors); i++) {
 		OCC_SENSOR_NODE(power_cap_sensor_node, node, power_cap_sensors[i].name,
-				power_cap_sensors[i].unit, addr + power_cap_sensors[i].offset,
+				power_cap_sensors[i].unit, power_cap_sensors[i].scale, addr + power_cap_sensors[i].offset,
 				power_cap_sensors[i].size);
 	}
 
 	for_each_chip(chip) {
 		addr = (uint64_t)occ_sensor_data(chip);
-		OCC_SENSOR_NODE(occ_sensor_node, chip_node, "chip", NULL, addr, 0);
+		OCC_SENSOR_NODE(occ_sensor_node, chip_node, "chip", NULL, 0, addr, 0);
 		dt_add_property_cells(chip_node, "ibm,chip-id", chip->id);
 		dt_add_property_cells(chip_node, "#address-cells", 2);
 		dt_add_property_cells(chip_node, "#size-cells", 1);
 
 		for (i = 0; i < ARRAY_SIZE(chip_sensors); i++) {
 			OCC_SENSOR_NODE(chip_node, node, chip_sensors[i].name,
-					chip_sensors[i].unit, addr + chip_sensors[i].offset,
+					chip_sensors[i].unit, chip_sensors[i].scale, addr + chip_sensors[i].offset,
 					chip_sensors[i].size);
 		}
 		i = k = 0;
@@ -575,7 +578,7 @@ static void populate_occ_sensors(void)
 				while (!((*(u16 *)(addr + 2) >> k ) & 1))
 					k++;
 				OCC_SENSOR_NODE(core_node[j], node, core_sensors[i].name,
-                                                core_sensors[i].unit, addr + core_sensors[i].offset + k * 2,
+                                                core_sensors[i].unit, core_sensors[i].scale, addr + core_sensors[i].offset + k * 2,
 						core_sensors[i].size);
 				k++;
 			}
