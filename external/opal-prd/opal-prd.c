@@ -57,6 +57,7 @@
 #include "module.h"
 #include "pnor.h"
 #include "i2c.h"
+#include "occ.h"
 
 struct prd_range {
 	const char		*name;
@@ -2492,6 +2493,152 @@ static int send_run_command(struct opal_prd_ctx *ctx, int argc, char *argv[])
 	return rc;
 }
 
+unsigned long read_counter(struct occ_sensor_data_header *hb, uint32_t offset)
+{
+	struct occ_sensor_counter *sping, *spong;
+	struct occ_sensor_counter *sensor = NULL;
+	uint8_t *ping, *pong;
+
+	ping = (uint8_t *)((uint64_t)hb + be32toh(hb->reading_ping_offset));
+	pong = (uint8_t *)((uint64_t)hb + be32toh(hb->reading_pong_offset));
+	sping = (struct occ_sensor_counter *)((uint64_t)ping + offset);
+	spong = (struct occ_sensor_counter *)((uint64_t)pong + offset);
+
+	if (*ping && *pong) {
+		if (be64toh(sping->timestamp) > be64toh(spong->timestamp))
+			sensor = sping;
+		else
+			sensor = spong;
+	} else if (*ping && !*pong) {
+		sensor = sping;
+	} else if (!*ping && *pong) {
+		sensor = spong;
+	} else if (!*ping && !*pong) {
+		return 0;
+	}
+
+	return be64toh(sensor->accumulator);
+}
+
+enum sensor_attr {
+	SENSOR_SAMPLE,
+	SENSOR_ACCUMULATOR,
+};
+
+unsigned long read_sensor(struct occ_sensor_data_header *hb, uint32_t offset,
+			  int attr)
+{
+	struct occ_sensor_record *sping, *spong;
+	struct occ_sensor_record *sensor = NULL;
+	uint8_t *ping, *pong;
+
+	ping = (uint8_t *)((uint64_t)hb + be32toh(hb->reading_ping_offset));
+	pong = (uint8_t *)((uint64_t)hb + be32toh(hb->reading_pong_offset));
+	sping = (struct occ_sensor_record *)((uint64_t)ping + offset);
+	spong = (struct occ_sensor_record *)((uint64_t)pong + offset);
+
+	if (*ping && *pong) {
+		if (be64toh(sping->timestamp) > be64toh(spong->timestamp))
+			sensor = sping;
+		else
+			sensor = spong;
+	} else if (*ping && !*pong) {
+		sensor = sping;
+	} else if (!*ping && *pong) {
+		sensor = spong;
+	} else if (!*ping && !*pong) {
+		return 0;
+	}
+
+	switch (attr) {
+	case SENSOR_SAMPLE:
+		return be16toh(sensor->sample);
+	case SENSOR_ACCUMULATOR:
+		return be64toh(sensor->accumulator);
+	default:
+		break;
+	}
+
+	return 0;
+}
+
+#define TO_FP(f)    ((f >> 8) * pow(10, ((int8_t)(f & 0xFF))))
+
+void print_all_sensors(void *buf)
+{
+	struct occ_sensor_data_header *hb;
+	struct occ_sensor_name *md;
+	int i = 0;
+
+	hb = (struct occ_sensor_data_header *)(uint64_t)buf;
+	md = (struct occ_sensor_name *)((uint64_t)hb +
+			be32toh(hb->names_offset));
+
+	for (i = 0; i < be16toh(hb->nr_sensors); i++) {
+		uint32_t offset =  be32toh(md[i].reading_offset);
+		uint32_t scale = be32toh(md[i].scale_factor);
+		uint64_t sample;
+
+		if (md[i].structure_type == OCC_SENSOR_READING_FULL)
+			sample = read_sensor(hb, offset, SENSOR_SAMPLE);
+		else
+			sample = read_counter(hb, offset);
+
+		if (be16toh(md[i].type) ==OCC_SENSOR_TYPE_POWER) {
+			uint64_t energy = read_sensor(hb, offset,
+						      SENSOR_ACCUMULATOR);
+			uint32_t freq = be32toh(md[i].freq);
+
+			printf("%5d %-20s %16lu %s %16luJ\n", i, md[i].name,
+			(uint64_t)(sample * TO_FP(scale)), md[i].units,
+			(uint64_t)(energy / TO_FP(freq)));
+		} else {
+			printf("%5d %-20s %16lu %s\n", i, md[i].name,
+			(uint64_t)(sample * TO_FP(scale)), md[i].units);
+		}
+	}
+}
+
+static int read_sensor(struct opal_prd_ctx *ctx, int argc, char *argv[])
+{
+	void *buf;
+	int fd, rc, bytes;
+	int chipid;
+
+	if (argc < 2)
+		chipid = 0;
+	else
+		chipid = atoi(argv[1]);
+
+	fd = open("/sys/firmware/opal/exports/occ_inband_sensors", O_RDONLY);
+	if (fd < 0) {
+		printf("Failed to open occ_inband_sensors file\n");
+		return -1;
+	}
+
+	buf = malloc(OCC_SENSOR_DATA_BLOCK_SIZE);
+	if (!buf) {
+		printf("Failed to allocate\n");
+		return -1;
+	}
+
+	lseek(fd, chipid * OCC_SENSOR_DATA_BLOCK_SIZE, SEEK_CUR);
+	for (rc = bytes = 0; bytes < OCC_SENSOR_DATA_BLOCK_SIZE; bytes += rc) {
+		rc = read(fd, buf + bytes, OCC_SENSOR_DATA_BLOCK_SIZE - bytes);
+		if (!rc || rc < 0)
+			break;
+	}
+
+	if (bytes != OCC_SENSOR_DATA_BLOCK_SIZE) {
+		printf("Failed to read data\n");
+		return -1;
+	}
+
+	print_all_sensors(buf);
+
+	return 0;
+}
+
 static void usage(const char *progname)
 {
 	printf("Usage:\n");
@@ -2502,6 +2649,7 @@ static void usage(const char *progname)
 	printf("\t%s htmgt-passthru <bytes...>\n", progname);
 	printf("\t%s override <FILE>\n", progname);
 	printf("\t%s run [arg 0] [arg 1]..[arg n]\n", progname);
+	printf("\t%s sensor [chip]\n", progname);
 	printf("\n");
 	printf("Options:\n"
 "\t--debug            verbose logging for debug information\n"
@@ -2534,6 +2682,7 @@ enum action {
 	ACTION_ATTR_OVERRIDE,
 	ACTION_HTMGT_PASSTHRU,
 	ACTION_RUN_COMMAND,
+	ACTION_READ_SENSOR,
 };
 
 static int parse_action(const char *str, enum action *action)
@@ -2570,6 +2719,8 @@ static int parse_action(const char *str, enum action *action)
 	} else if (!strcmp(str, "run")) {
 		*action = ACTION_RUN_COMMAND;
 		return 0;
+	} else if (!strcmp(str, "sensor")) {
+		*action = ACTION_READ_SENSOR;
 	} else {
 		pr_log(LOG_ERR, "CTRL: unknown argument '%s'", str);
 		rc = -1;
@@ -2682,6 +2833,9 @@ int main(int argc, char *argv[])
 		}
 
 		rc = send_run_command(ctx, argc - optind, &argv[optind]);
+		break;
+	case ACTION_READ_SENSOR:
+		rc = read_sensor(ctx, argc - optind, &argv[optind]);
 		break;
 	default:
 		break;
